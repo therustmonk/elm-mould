@@ -7,7 +7,7 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
     , interact
     , Notification(..)
     , listen
-    , FailReason
+    , FailReason(..)
     , failToString
     )
 
