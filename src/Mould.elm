@@ -2,6 +2,7 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
     ( Request
     , send
     , Response(..)
+    , SubRequest
     , answer
     , cancel
     , interact
@@ -17,7 +18,7 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
 @docs listen, interact
 
 # Messaging
-@docs send, answer, cancel, Request, Response, Notification, FailReason
+@docs send, answer, cancel, Request, SubRequest, Response, Notification, FailReason
 
 # Utils
 @docs failToString
@@ -37,6 +38,13 @@ import WebSocket.LowLevel as WS
 type alias Request =
     { service: String
     , action: String
+    , payload: JS.Value
+    }
+
+{-| SubRequest for answering to a Mould server.
+-}
+type alias SubRequest =
+    { action: String
     , payload: JS.Value
     }
 
@@ -64,7 +72,7 @@ type Response
 
 type MyCmd msg
     = Send String String Request
-    | Answer String String (Maybe JS.Value)
+    | Answer String String (Maybe SubRequest)
     | Cancel String String
 
 {-| Convert FailReason to user readable string.
@@ -97,8 +105,8 @@ cmdMap _ cmd =
     case cmd of
         Send url namespace request ->
             Send url namespace request
-        Answer url namespace maybeValue ->
-            Answer url namespace maybeValue
+        Answer url namespace maybeSubRequest ->
+            Answer url namespace maybeSubRequest
         Cancel url namespace ->
             Cancel url namespace
 
@@ -137,9 +145,9 @@ send url namespace request =
 
     Mould.answer "ws://mould.example.com" "task-id" Nothing
 -}
-answer : String -> String -> Maybe JS.Value -> Cmd msg
-answer url namespace maybeValue =
-    command (Answer url namespace maybeValue)
+answer : String -> String -> Maybe SubRequest -> Cmd msg
+answer url namespace maybeSubRequest =
+    command (Answer url namespace maybeSubRequest)
 
 {-| Cancel current task with **id**. Example:
 
@@ -340,13 +348,13 @@ processCommands router cmds state =
                 `Task.andThen` \state ->
                     processCommands router tail state
         -- ANSWER CURRENT | HAS ACTIVE | CONNECTED
-        ((Answer url tag maybeValue) :: tail, Active activeTag _, Connected socket) ->
+        ((Answer url tag maybeSubRequest) :: tail, Active activeTag _, Connected socket) ->
             if tag /= activeTag then
                 notifyInteractors (Failed tag (UnexpectedAnswer activeTag))
                     `Task.andThen` \_ ->
                 processCommands router tail state
             else
-                WS.send socket (stringifyNext maybeValue)
+                WS.send socket (stringifyNext maybeSubRequest)
                     `Task.andThen` \maybeBadSend ->
                 case maybeBadSend of
                     Just badSend ->
@@ -587,8 +595,16 @@ stringifyRequest request =
     in
         JS.encode 0 (createEvent "request" (Just data))
 
-stringifyNext : Maybe JS.Value -> String
-stringifyNext maybeData =
+stringifyNext : Maybe SubRequest -> String
+stringifyNext maybeSubReuqest =
+    let
+        maybeData = Maybe.map
+            (\request -> JS.object
+                [ ("action", JS.string request.action)
+                , ("payload", request.payload)
+                ])
+            maybeSubReuqest
+    in
         JS.encode 0 (createEvent "next" maybeData)
 
 stringifyCancel : String
