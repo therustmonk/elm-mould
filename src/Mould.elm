@@ -5,6 +5,7 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
     , SubRequest
     , answer
     , cancel
+    , suspend
     , interact
     , Notification(..)
     , listen
@@ -18,7 +19,7 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
 @docs listen, interact
 
 # Messaging
-@docs send, answer, cancel, Request, SubRequest, Response, Notification, FailReason
+@docs send, answer, cancel, suspend, Request, SubRequest, Response, Notification, FailReason
 
 # Utils
 @docs failToString
@@ -56,6 +57,7 @@ type FailReason
     | NoDataProvided
     | ConnectionBroken
     | UnexpectedAnswer String
+    | UnexpectedSuspend String
     | UnexpectedCancel String
     | HasActiveTask String
     | InternalError String
@@ -69,10 +71,12 @@ type Response
     | Rejected String String
     | Failed String FailReason
     | Asking String
+    | Suspended String Int
 
 type MyCmd msg
     = Send String String Request
     | Answer String String (Maybe SubRequest)
+    | Suspend String String
     | Cancel String String
 
 {-| Convert FailReason to user readable string.
@@ -90,6 +94,8 @@ failToString fail =
             "connection broken"
         UnexpectedAnswer tag ->
             "unexpected answer " ++ tag
+        UnexpectedSuspend tag ->
+            "unexpected suspend " ++ tag
         UnexpectedCancel tag ->
             "unexpected cancel " ++ tag
         HasActiveTask tag ->
@@ -107,6 +113,8 @@ cmdMap _ cmd =
             Send url namespace request
         Answer url namespace maybeSubRequest ->
             Answer url namespace maybeSubRequest
+        Suspend url namespace ->
+            Suspend url namespace
         Cancel url namespace ->
             Cancel url namespace
 
@@ -115,6 +123,7 @@ getCmdTag cmd =
     case cmd of
         Send _ tag _ -> tag
         Answer _ tag _ -> tag
+        Suspend _ tag -> tag
         Cancel _ tag -> tag
 
 getCmdUrl : MyCmd a -> String
@@ -122,6 +131,7 @@ getCmdUrl cmd =
     case cmd of
         Send url _ _ -> url
         Answer url _ _ -> url
+        Suspend url _ -> url
         Cancel url _ -> url
 
 {-| Send a new request to a mould session. Use it like this:
@@ -148,6 +158,14 @@ send url namespace request =
 answer : String -> String -> Maybe SubRequest -> Cmd msg
 answer url namespace maybeSubRequest =
     command (Answer url namespace maybeSubRequest)
+
+{-| Suspend current task with **id**. Suspended id response expected. Example:
+
+    Mould.suspend "ws://mould.example.com" "task-id"
+-}
+suspend : String -> String -> Cmd msg
+suspend url namespace =
+    command (Suspend url namespace)
 
 {-| Cancel current task with **id**. Example:
 
@@ -365,6 +383,24 @@ processCommands router cmds state =
                         Task.succeed state -- stay Active
                     `Task.andThen` \state ->
                         processCommands router tail state
+        -- SUSPEND CURRENT | HAS ACTIVE | CONNECTED
+        ((Suspend url tag) :: tail, Active activeTag _, Connected socket) ->
+            if tag /= activeTag then
+                notifyInteractors (Failed tag (UnexpectedSuspend activeTag))
+                    `Task.andThen` \_ ->
+                processCommands router tail state
+            else
+                WS.send socket (stringifySuspend)
+                    `Task.andThen` \maybeBadSend ->
+                case maybeBadSend of
+                    Just badSend ->
+                        notifyInteractors (Failed tag ConnectionBroken)
+                            `Task.andThen` \_ ->
+                        Task.succeed { state | task = Idle } -- become Idle
+                    Nothing ->
+                        Task.succeed state -- stay Active
+                    `Task.andThen` \state ->
+                        processCommands router tail state
         -- CANCEL CURRENT | HAS ACTIVE | CONNECTED
         ((Cancel url tag) :: tail, Active activeTag _, Connected socket) ->
             if tag /= activeTag then
@@ -453,6 +489,7 @@ onSelfMsgState router selfMsg state =
                             Done _ -> True
                             Failed _ _ -> True
                             Rejected _ _ -> True
+                            Suspended _ _ -> True
                             Received _ _ -> False
                             Asking _ -> False
                 in
@@ -554,6 +591,16 @@ parseToResponse tag data =
                                     Failed tag (ParseError explanation)
                         Nothing ->
                             Failed tag NoDataProvided
+                "suspended" ->
+                    case event.data of
+                        Just data ->
+                            case (JD.decodeValue JD.int data) of
+                                Ok taskId ->
+                                    Suspended tag taskId
+                                Err explanation ->
+                                    Failed tag (ParseError explanation)
+                        Nothing ->
+                            Failed tag NoDataProvided
                 unknown ->
                     Failed tag (UnknownEvent unknown)
         Err explanation ->
@@ -606,6 +653,10 @@ stringifyNext maybeSubReuqest =
             maybeSubReuqest
     in
         JS.encode 0 (createEvent "next" maybeData)
+
+stringifySuspend : String
+stringifySuspend =
+        JS.encode 0 (createEvent "suspend" Nothing)
 
 stringifyCancel : String
 stringifyCancel =
