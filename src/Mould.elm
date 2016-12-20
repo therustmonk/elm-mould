@@ -6,6 +6,7 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
     , answer
     , cancel
     , suspend
+    , resume
     , interact
     , Notification(..)
     , listen
@@ -19,7 +20,7 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
 @docs listen, interact
 
 # Messaging
-@docs send, answer, cancel, suspend, Request, SubRequest, Response, Notification, FailReason
+@docs send, answer, cancel, suspend, resume, Request, SubRequest, Response, Notification, FailReason
 
 # Utils
 @docs failToString
@@ -77,6 +78,7 @@ type MyCmd msg
     = Send String String Request
     | Answer String String (Maybe SubRequest)
     | Suspend String String
+    | Resume String String Int
     | Cancel String String
 
 {-| Convert FailReason to user readable string.
@@ -115,6 +117,8 @@ cmdMap _ cmd =
             Answer url namespace maybeSubRequest
         Suspend url namespace ->
             Suspend url namespace
+        Resume url namespace taskId ->
+            Resume url namespace taskId
         Cancel url namespace ->
             Cancel url namespace
 
@@ -124,6 +128,7 @@ getCmdTag cmd =
         Send _ tag _ -> tag
         Answer _ tag _ -> tag
         Suspend _ tag -> tag
+        Resume _ tag _ -> tag
         Cancel _ tag -> tag
 
 getCmdUrl : MyCmd a -> String
@@ -132,6 +137,7 @@ getCmdUrl cmd =
         Send url _ _ -> url
         Answer url _ _ -> url
         Suspend url _ -> url
+        Resume url _ _ -> url
         Cancel url _ -> url
 
 {-| Send a new request to a mould session. Use it like this:
@@ -166,6 +172,14 @@ answer url namespace maybeSubRequest =
 suspend : String -> String -> Cmd msg
 suspend url namespace =
     command (Suspend url namespace)
+
+{-| Resume current task with **id**. Task should be suspended before (task-id retrived). Example:
+
+    Mould.resume "ws://mould.example.com" "task-id" 0
+-}
+resume : String -> String -> Int -> Cmd msg
+resume url namespace taskId =
+    command (Resume url namespace taskId)
 
 {-| Cancel current task with **id**. Example:
 
@@ -218,9 +232,13 @@ listen : String -> (Notification -> msg) -> Sub msg
 listen url tagger =
     subscription (Listen url tagger)
 
+type TaskOrigin
+    = FromRequest Request
+    | FromId Int
+
 type Task
     = Idle
-    | Active String Request
+    | Active String TaskOrigin
 
 type alias Uplink msg = Dict String (State msg)
 
@@ -362,7 +380,22 @@ processCommands router cmds state =
                 Nothing ->
                     notifyListeners (BeginTask tag)
                         `Task.andThen` \_ ->
-                    Task.succeed { state | task = Active tag request }
+                    Task.succeed { state | task = Active tag <| FromRequest request }
+                `Task.andThen` \state ->
+                    processCommands router tail state
+        -- RESUME INTERACTION | NO ACTIVE | CONNECTED
+        ((Resume url tag taskId) :: tail, Idle, Connected socket) ->
+            WS.send socket (stringifyResume taskId)
+                `Task.andThen` \maybeBadSend ->
+            case maybeBadSend of
+                Just badSend ->
+                    notifyInteractors (Failed tag ConnectionBroken)
+                        `Task.andThen` \_ ->
+                    Task.succeed state -- stay Idle
+                Nothing ->
+                    notifyListeners (BeginTask tag)
+                        `Task.andThen` \_ ->
+                    Task.succeed { state | task = Active tag <| FromId taskId }
                 `Task.andThen` \state ->
                     processCommands router tail state
         -- ANSWER CURRENT | HAS ACTIVE | CONNECTED
@@ -656,11 +689,18 @@ stringifyNext maybeSubReuqest =
 
 stringifySuspend : String
 stringifySuspend =
-        JS.encode 0 (createEvent "suspend" Nothing)
+    JS.encode 0 (createEvent "suspend" Nothing)
+
+stringifyResume : Int -> String
+stringifyResume taskId =
+    let
+        data = JS.int taskId
+    in
+        JS.encode 0 (createEvent "resume" (Just data))
 
 stringifyCancel : String
 stringifyCancel =
-        JS.encode 0 (createEvent "cancel" Nothing)
+    JS.encode 0 (createEvent "cancel" Nothing)
 
 createEvent : String -> Maybe JS.Value -> JS.Value
 createEvent name data =
