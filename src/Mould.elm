@@ -2,6 +2,7 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
     ( Request
     , send
     , Response(..)
+    , getTag
     , SubRequest
     , answer
     , cancel
@@ -23,7 +24,7 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
 @docs send, answer, cancel, suspend, resume, Request, SubRequest, Response, Notification, FailReason
 
 # Utils
-@docs failToString
+@docs getTag, failToString
 
 -}
 
@@ -74,6 +75,18 @@ type Response
     | Failed String FailReason
     | Asking String
     | Suspended String Int
+
+{-| Returns tag of response.
+-}
+getTag : Response -> String
+getTag response =
+    case response of
+        Done tag -> tag
+        Received tag _ -> tag
+        Rejected tag _ -> tag
+        Failed tag _ -> tag
+        Asking tag -> tag
+        Suspended tag _ -> tag
 
 type MyCmd msg
     = Send String String Request
