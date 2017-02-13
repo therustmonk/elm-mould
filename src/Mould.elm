@@ -64,6 +64,7 @@ type FailReason
     | InternalError String
     | Canceled
 
+-- TODO IMPORTANT TO MOVE TAG OUT: (tag, Response)
 {-| Response from Mould server.
 -}
 type Response
