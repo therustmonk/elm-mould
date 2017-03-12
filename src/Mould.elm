@@ -31,7 +31,7 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
 import Set exposing (Set)
 import Dict exposing (Dict)
 import Json.Encode as JS
-import Json.Decode as JD exposing ((:=))
+import Json.Decode as JD exposing (field)
 import Task exposing (Task)
 import Process
 import WebSocket.LowLevel as WS
@@ -303,22 +303,19 @@ onEffects router cmds subs uplink =
     let
         expectedUplink =
             subs
-                |> List.map (\sub -> (getSubUrl sub, ()))
-                |> Dict.fromList
+            |> List.map (\sub -> (getSubUrl sub, ()))
+            |> Dict.fromList
         cmdFilter url = List.filter (\cmd -> getCmdUrl cmd == url) cmds
         subFilter url = List.filter (\sub -> getSubUrl sub == url) subs
         keepSub url _ state uplinkTask =
             uplinkTask
-                `Task.andThen` \uplink' ->
-            onEffectsState router url (cmdFilter url) (subFilter url) state
-                `Task.andThen` \state ->
-            Task.succeed (Dict.insert url state uplink')
+            |> Task.andThen (\uplink_ -> onEffectsState router url (cmdFilter url) (subFilter url) state
+            |> Task.andThen (\state -> Task.succeed (Dict.insert url state uplink_)))
         newSub url blank uplinkTask =
             keepSub url blank initState uplinkTask
         leaveSub url state uplinkTask =
             close state.status
-                `Task.andThen` \_ ->
-            uplinkTask
+            |> Task.andThen (\_ -> uplinkTask)
     in
        Dict.merge newSub keepSub leaveSub expectedUplink uplink (Task.succeed uplink)
 
@@ -331,20 +328,16 @@ onEffectsState
     -> Platform.Task Never (State msg)
 onEffectsState router url cmds subs state =
     Task.succeed state
-        `Task.andThen` \state1 ->
-    connectIfDisconnected router url state1
-        `Task.andThen` \state2 ->
-    processSubscriptions router subs state2
-        `Task.andThen` \state3 ->
-    processCommands router cmds state3
+    |> Task.andThen (\state1 -> connectIfDisconnected router url state1)
+    |> Task.andThen (\state2 -> processSubscriptions router subs state2)
+    |> Task.andThen (\state3 -> processCommands router cmds state3)
 
 connectIfDisconnected : Platform.Router msg Msg -> String -> State msg -> Platform.Task Never (State msg)
 connectIfDisconnected router url state =
     case state.status of
         Disconnected ->
             open url router
-                `Task.andThen` \pid ->
-            Task.succeed { state | status = Opening pid }
+            |> Task.andThen (\pid -> Task.succeed { state | status = Opening pid })
         _ ->
             Task.succeed state
 
@@ -362,10 +355,10 @@ processSubscriptions router subs state =
             Interact _ tagger -> Just tagger
             _ -> Nothing
         -- TODO But important to reject tasks of removed subscriptions and send notification about it
-        listeners' = List.filterMap listenerExtractor subs
-        interactors' = List.filterMap interactorExtractor subs
+        listeners_ = List.filterMap listenerExtractor subs
+        interactors_ = List.filterMap interactorExtractor subs
     in
-        Task.succeed { state | interactors = interactors', listeners = listeners' }
+        Task.succeed { state | interactors = interactors_, listeners = listeners_ }
 
 processCommands
     : Platform.Router msg Msg
@@ -385,100 +378,87 @@ processCommands router cmds state =
         -- SEND NEW | NO ACTIVE | CONNECTED
         ((Send url tag request) :: tail, Idle, Connected socket) ->
             WS.send socket (stringifyRequest request)
-                `Task.andThen` \maybeBadSend ->
-            case maybeBadSend of
-                Just badSend ->
-                    notifyInteractors (Failed tag ConnectionBroken)
-                        `Task.andThen` \_ ->
-                    Task.succeed state -- stay Idle
-                Nothing ->
-                    notifyListeners (BeginTask tag)
-                        `Task.andThen` \_ ->
-                    Task.succeed { state | task = Active tag <| FromRequest request }
-                `Task.andThen` \state ->
-                    processCommands router tail state
+            |> Task.andThen
+                (\maybeBadSend -> case maybeBadSend of
+                    Just badSend ->
+                        notifyInteractors (Failed tag ConnectionBroken)
+                        |> Task.andThen (\_ -> Task.succeed state) -- stay Idle
+                    Nothing ->
+                        notifyListeners (BeginTask tag)
+                        |> Task.andThen (\_ -> Task.succeed { state | task = Active tag <| FromRequest request })
+                    |> Task.andThen (\state -> processCommands router tail state)
+                )
         -- RESUME INTERACTION | NO ACTIVE | CONNECTED
-        ((Resume url tag taskId) :: tail, Idle, Connected socket) ->
-            WS.send socket (stringifyResume taskId)
-                `Task.andThen` \maybeBadSend ->
-            case maybeBadSend of
-                Just badSend ->
-                    notifyInteractors (Failed tag ConnectionBroken)
-                        `Task.andThen` \_ ->
-                    Task.succeed state -- stay Idle
-                Nothing ->
-                    notifyListeners (BeginTask tag)
-                        `Task.andThen` \_ ->
-                    Task.succeed { state | task = Active tag <| FromId taskId }
-                `Task.andThen` \state ->
-                    processCommands router tail state
+        ((Resume url tag taskId) :: tail, Idle, Connected socket) -> WS.send socket (stringifyResume taskId)
+            |> Task.andThen
+                (\maybeBadSend -> case maybeBadSend of
+                    Just badSend ->
+                        notifyInteractors (Failed tag ConnectionBroken)
+                        |> Task.andThen (\_ -> Task.succeed state) -- stay Idle
+                    Nothing ->
+                        notifyListeners (BeginTask tag)
+                        |> Task.andThen (\_ -> Task.succeed { state | task = Active tag <| FromId taskId })
+                    |> Task.andThen (\state -> processCommands router tail state)
+                )
         -- ANSWER CURRENT | HAS ACTIVE | CONNECTED
         ((Answer url tag maybeSubRequest) :: tail, Active activeTag _, Connected socket) ->
             if tag /= activeTag then
                 notifyInteractors (Failed tag (UnexpectedAnswer activeTag))
-                    `Task.andThen` \_ ->
-                processCommands router tail state
+                |> Task.andThen (\_ -> processCommands router tail state)
             else
                 WS.send socket (stringifyNext maybeSubRequest)
-                    `Task.andThen` \maybeBadSend ->
-                case maybeBadSend of
-                    Just badSend ->
-                        notifyInteractors (Failed tag ConnectionBroken)
-                            `Task.andThen` \_ ->
-                        Task.succeed { state | task = Idle } -- become Idle
-                    Nothing ->
-                        Task.succeed state -- stay Active
-                    `Task.andThen` \state ->
-                        processCommands router tail state
+                |> Task.andThen
+                    (\maybeBadSend -> case maybeBadSend of
+                        Just badSend ->
+                            notifyInteractors (Failed tag ConnectionBroken)
+                            |> Task.andThen (\_ -> Task.succeed { state | task = Idle }) -- become Idle
+                        Nothing ->
+                            Task.succeed state -- stay Active
+                        |> Task.andThen (\state -> processCommands router tail state)
+                    )
         -- SUSPEND CURRENT | HAS ACTIVE | CONNECTED
         ((Suspend url tag) :: tail, Active activeTag _, Connected socket) ->
             if tag /= activeTag then
                 notifyInteractors (Failed tag (UnexpectedSuspend activeTag))
-                    `Task.andThen` \_ ->
-                processCommands router tail state
+                |> Task.andThen (\_ -> processCommands router tail state)
             else
                 WS.send socket (stringifySuspend)
-                    `Task.andThen` \maybeBadSend ->
-                case maybeBadSend of
-                    Just badSend ->
-                        notifyInteractors (Failed tag ConnectionBroken)
-                            `Task.andThen` \_ ->
-                        Task.succeed { state | task = Idle } -- become Idle
-                    Nothing ->
-                        Task.succeed state -- stay Active
-                    `Task.andThen` \state ->
-                        processCommands router tail state
+                |> Task.andThen
+                    (\maybeBadSend -> case maybeBadSend of
+                        Just badSend ->
+                            notifyInteractors (Failed tag ConnectionBroken)
+                            |> Task.andThen (\_ -> Task.succeed { state | task = Idle }) -- become Idle
+                        Nothing ->
+                            Task.succeed state -- stay Active
+                        |> Task.andThen (\state -> processCommands router tail state)
+                    )
         -- CANCEL CURRENT | HAS ACTIVE | CONNECTED
         ((Cancel url tag) :: tail, Active activeTag _, Connected socket) ->
             if tag /= activeTag then
                 notifyInteractors (Failed tag (UnexpectedCancel activeTag))
-                    `Task.andThen` \_ ->
-                processCommands router tail state
+                |> Task.andThen (\_ -> processCommands router tail state)
             else
                 WS.send socket (stringifyCancel)
-                    `Task.andThen` \maybeBadSend ->
-                let
-                    failedMsg = case maybeBadSend of
-                        Just badSend -> (Failed tag ConnectionBroken)
-                        Nothing -> (Failed tag Canceled)
-                in
-                    notifyListeners (EndTask tag)
-                        `Task.andThen` \_ ->
-                    notifyInteractors failedMsg
-                        `Task.andThen` \_ ->
-                            Task.succeed { state | task = Idle } -- become Idle
-                    `Task.andThen` \state ->
-                processCommands router tail state
+                |> Task.andThen
+                    (\maybeBadSend ->
+                    let
+                        failedMsg = case maybeBadSend of
+                            Just badSend -> (Failed tag ConnectionBroken)
+                            Nothing -> (Failed tag Canceled)
+                    in
+                        notifyListeners (EndTask tag)
+                        |> Task.andThen (\_ -> notifyInteractors failedMsg)
+                        |> Task.andThen (\_ -> Task.succeed { state | task = Idle }) -- become Idle
+                        |> Task.andThen (\state -> processCommands router tail state)
+                    )
         -- SEND NEW | HAS ACTIVE | ANY
         ((Send url tag _) :: tail, Active activeTag _, _) ->
             notifyInteractors (Failed tag (HasActiveTask activeTag))
-                `Task.andThen` \_ ->
-            processCommands router tail state
+            |> Task.andThen (\_ -> processCommands router tail state)
         -- ANY | ANY | ANY
         (cmd :: tail, _, _) ->
             notifyInteractors (Failed (getCmdTag cmd) ConnectionBroken)
-                `Task.andThen` \_ ->
-            processCommands router tail state
+            |> Task.andThen (\_ -> processCommands router tail state)
 
 -- HANDLE SELF MESSAGES
 
@@ -509,8 +489,7 @@ onSelfMsg router selfMsg uplink =
         case Dict.get url uplink of
             Just state ->
                 onSelfMsgState router selfMsg state
-                    `Task.andThen` \state' ->
-                Task.succeed (Dict.insert url state' uplink)
+                |> Task.andThen (\state_ -> Task.succeed (Dict.insert url state_ uplink))
             Nothing ->
                 Task.succeed uplink
 
@@ -541,39 +520,35 @@ onSelfMsgState router selfMsg state =
                             Asking _ -> False
                 in
                     notifyInteractors response
-                        `Task.andThen` \_ ->
-                    if readyToNext then
-                        notifyListeners (EndTask tag)
-                            `Task.andThen` \_ ->
-                        Task.succeed { state | task = Idle }
-                    else
-                        Task.succeed state
+                    |> Task.andThen
+                        (\_ ->
+                        if readyToNext then
+                            notifyListeners (EndTask tag)
+                            |> Task.andThen (\_ -> Task.succeed { state | task = Idle })
+                        else
+                            Task.succeed state
+                        )
             Idle ->
                 notifyListeners (UntrackedEvent data)
-                    `Task.andThen` \_ ->
-                Task.succeed state
+                |> Task.andThen (\_ -> Task.succeed state)
         GoodOpen url socket ->
             notifyListeners ConnectionEstablished
-                `Task.andThen` \_ ->
-            Task.succeed { state | status = Connected socket }
+            |> Task.andThen (\_ -> Task.succeed { state | status = Connected socket })
         BadOpen url ->
             open url router
-                `Task.andThen` \pid ->
-            Task.succeed { state | status = Opening pid }
+            |> Task.andThen (\pid -> Task.succeed { state | status = Opening pid })
         Die url ->
             notifyListeners ConnectionLost
-                `Task.andThen` \_ ->
-            open url router
-                `Task.andThen` \pid ->
-            Task.succeed { state | status = Opening pid }
-                `Task.andThen` \state' ->
-            case state.task of
-                Idle ->
-                    Task.succeed state'
-                Active tag _ ->
-                    notifyInteractors (Failed tag ConnectionBroken)
-                        `Task.andThen` \_ ->
-                    Task.succeed { state' | task = Idle }
+            |> Task.andThen (\_ -> open url router)
+            |> Task.andThen (\pid -> Task.succeed { state | status = Opening pid })
+            |> Task.andThen
+                (\state_ -> case state.task of
+                    Idle ->
+                        Task.succeed state_
+                    Active tag _ ->
+                        notifyInteractors (Failed tag ConnectionBroken)
+                        |> Task.andThen (\_ -> Task.succeed { state_ | task = Idle })
+                )
 
 open : String -> Platform.Router msg Msg -> Platform.Task Never Process.Id
 open url router =
@@ -591,7 +566,10 @@ open url router =
             , onClose = die
             }
     in
-        Process.spawn ((WS.open url settings) `Task.andThen` goodOpen `Task.onError` badOpen)
+        WS.open url settings
+        |> Task.andThen goodOpen
+        |> Task.onError badOpen
+        |> Process.spawn
 
 close : Status -> Platform.Task x ()
 close status =
@@ -669,9 +647,9 @@ type alias Event =
 
 eventDecoder : JD.Decoder Event
 eventDecoder =
-    JD.object2 Event
-        ("event" := JD.string)
-        (JD.maybe ("data" := JD.value))
+    JD.map2 Event
+        (field "event" JD.string)
+        (JD.maybe <| field "data" JD.value)
 
 
 decodeEvent : String -> (Result String Event)
