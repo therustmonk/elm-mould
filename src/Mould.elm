@@ -46,10 +46,7 @@ type alias Request =
 
 {-| SubRequest for answering to a Mould server.
 -}
-type alias SubRequest =
-    { action: String
-    , payload: JS.Value
-    }
+type alias SubRequest = JS.Value
 
 {-| Type with reason why task failed.
 -}
@@ -669,15 +666,7 @@ stringifyRequest request =
 
 stringifyNext : Maybe SubRequest -> String
 stringifyNext maybeSubReuqest =
-    let
-        maybeData = Maybe.map
-            (\request -> JS.object
-                [ ("action", JS.string request.action)
-                , ("payload", request.payload)
-                ])
-            maybeSubReuqest
-    in
-        JS.encode 0 (createEvent "next" maybeData)
+    JS.encode 0 (createEvent "next" maybeSubReuqest)
 
 stringifySuspend : String
 stringifySuspend =
