@@ -705,4 +705,5 @@ createEvent name data =
         Nothing ->
             JS.object
                 [ ("event", JS.string name)
+                , ("data", JS.null)
                 ]
