@@ -1,5 +1,5 @@
 {
-    "version": "4.0.0",
+    "version": "5.0.0",
     "summary": "Client library for connnecting to Mould server",
     "repository": "https://github.com/DenisKolodin/elm-mould.git",
     "license": "BSD3",
