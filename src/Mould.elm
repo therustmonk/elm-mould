@@ -68,7 +68,6 @@ type FailReason
 type Response
     = Done String
     | Received String JD.Value
-    | Rejected String String
     | Failed String FailReason
     | Asking String
     | Suspended String Int
@@ -80,7 +79,6 @@ getTag response =
     case response of
         Done tag -> tag
         Received tag _ -> tag
-        Rejected tag _ -> tag
         Failed tag _ -> tag
         Asking tag -> tag
         Suspended tag _ -> tag
@@ -511,7 +509,6 @@ onSelfMsgState router selfMsg state =
                         case response of
                             Done _ -> True
                             Failed _ _ -> True
-                            Rejected _ _ -> True
                             Suspended _ _ -> True
                             Received _ _ -> False
                             Asking _ -> False
@@ -593,16 +590,6 @@ parseToResponse tag data =
                             Failed tag NoDataProvided
                 "done" ->
                     Done tag
-                "reject" ->
-                    case event.data of
-                        Just data ->
-                            case (JD.decodeValue JD.string data) of
-                                Ok reason ->
-                                    Rejected tag reason
-                                Err explanation ->
-                                    Failed tag (ParseError explanation)
-                        Nothing ->
-                            Failed tag NoDataProvided
                 "fail" ->
                     case event.data of
                         Just data ->
