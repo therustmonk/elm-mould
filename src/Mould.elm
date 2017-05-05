@@ -2,7 +2,6 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
     ( Request
     , send
     , Response(..)
-    , getTag
     , SubRequest
     , answer
     , cancel
@@ -24,7 +23,7 @@ effect module Mould where { command = MyCmd, subscription = MySub } exposing
 @docs send, answer, cancel, suspend, resume, Request, SubRequest, Response, Notification, FailReason
 
 # Utils
-@docs getTag, failToString
+@docs failToString
 
 -}
 
@@ -69,22 +68,11 @@ type FailReason
 {-| Response from Mould server.
 -}
 type Response
-    = Done String
-    | Received String JD.Value
-    | Failed String FailReason
-    | Asking String
-    | Suspended String Int
-
-{-| Returns tag of response.
--}
-getTag : Response -> String
-getTag response =
-    case response of
-        Done tag -> tag
-        Received tag _ -> tag
-        Failed tag _ -> tag
-        Asking tag -> tag
-        Suspended tag _ -> tag
+    = Done
+    | Received JD.Value
+    | Failed FailReason
+    | Asking
+    | Suspended Int
 
 type MyCmd msg
     = Send Url Tag Request
@@ -379,7 +367,7 @@ processCommands router cmds state =
             |> Task.andThen
                 (\maybeBadSend -> case maybeBadSend of
                     Just badSend ->
-                        notifyInteractors (Failed tag ConnectionBroken)
+                        notifyInteractors (Failed ConnectionBroken)
                         |> Task.andThen (\_ -> Task.succeed state) -- stay Idle
                     Nothing ->
                         notifyListeners (BeginTask tag)
@@ -391,7 +379,7 @@ processCommands router cmds state =
             |> Task.andThen
                 (\maybeBadSend -> case maybeBadSend of
                     Just badSend ->
-                        notifyInteractors (Failed tag ConnectionBroken)
+                        notifyInteractors (Failed ConnectionBroken)
                         |> Task.andThen (\_ -> Task.succeed state) -- stay Idle
                     Nothing ->
                         notifyListeners (BeginTask tag)
@@ -401,14 +389,14 @@ processCommands router cmds state =
         -- ANSWER CURRENT | HAS ACTIVE | CONNECTED
         ((Answer url tag maybeSubRequest) :: tail, Active activeTag _, Connected socket) ->
             if tag /= activeTag then
-                notifyInteractors (Failed tag (UnexpectedAnswer activeTag))
+                notifyInteractors (Failed (UnexpectedAnswer activeTag))
                 |> Task.andThen (\_ -> processCommands router tail state)
             else
                 WS.send socket (stringifyNext maybeSubRequest)
                 |> Task.andThen
                     (\maybeBadSend -> case maybeBadSend of
                         Just badSend ->
-                            notifyInteractors (Failed tag ConnectionBroken)
+                            notifyInteractors (Failed ConnectionBroken)
                             |> Task.andThen (\_ -> Task.succeed { state | task = Idle }) -- become Idle
                         Nothing ->
                             Task.succeed state -- stay Active
@@ -417,14 +405,14 @@ processCommands router cmds state =
         -- SUSPEND CURRENT | HAS ACTIVE | CONNECTED
         ((Suspend url tag) :: tail, Active activeTag _, Connected socket) ->
             if tag /= activeTag then
-                notifyInteractors (Failed tag (UnexpectedSuspend activeTag))
+                notifyInteractors (Failed (UnexpectedSuspend activeTag))
                 |> Task.andThen (\_ -> processCommands router tail state)
             else
                 WS.send socket (stringifySuspend)
                 |> Task.andThen
                     (\maybeBadSend -> case maybeBadSend of
                         Just badSend ->
-                            notifyInteractors (Failed tag ConnectionBroken)
+                            notifyInteractors (Failed ConnectionBroken)
                             |> Task.andThen (\_ -> Task.succeed { state | task = Idle }) -- become Idle
                         Nothing ->
                             Task.succeed state -- stay Active
@@ -433,7 +421,7 @@ processCommands router cmds state =
         -- CANCEL CURRENT | HAS ACTIVE | CONNECTED
         ((Cancel url tag) :: tail, Active activeTag _, Connected socket) ->
             if tag /= activeTag then
-                notifyInteractors (Failed tag (UnexpectedCancel activeTag))
+                notifyInteractors (Failed (UnexpectedCancel activeTag))
                 |> Task.andThen (\_ -> processCommands router tail state)
             else
                 WS.send socket (stringifyCancel)
@@ -441,8 +429,8 @@ processCommands router cmds state =
                     (\maybeBadSend ->
                     let
                         failedMsg = case maybeBadSend of
-                            Just badSend -> (Failed tag ConnectionBroken)
-                            Nothing -> (Failed tag Canceled)
+                            Just badSend -> (Failed ConnectionBroken)
+                            Nothing -> (Failed Canceled)
                     in
                         notifyListeners (EndTask tag)
                         |> Task.andThen (\_ -> notifyInteractors failedMsg)
@@ -451,11 +439,11 @@ processCommands router cmds state =
                     )
         -- SEND NEW | HAS ACTIVE | ANY
         ((Send url tag _) :: tail, Active activeTag _, _) ->
-            notifyInteractors (Failed tag (HasActiveTask activeTag))
+            notifyInteractors (Failed (HasActiveTask activeTag))
             |> Task.andThen (\_ -> processCommands router tail state)
         -- ANY | ANY | ANY
         (cmd :: tail, _, _) ->
-            notifyInteractors (Failed (getCmdTag cmd) ConnectionBroken)
+            notifyInteractors (Failed ConnectionBroken)
             |> Task.andThen (\_ -> processCommands router tail state)
 
 -- HANDLE SELF MESSAGES
@@ -510,11 +498,11 @@ onSelfMsgState router selfMsg state =
                         parseToResponse tag data
                     readyToNext =
                         case response of
-                            Done _ -> True
-                            Failed _ _ -> True
-                            Suspended _ _ -> True
-                            Received _ _ -> False
-                            Asking _ -> False
+                            Done -> True
+                            Failed _ -> True
+                            Suspended _ -> True
+                            Received _ -> False
+                            Asking -> False
                 in
                     notifyInteractors response
                     |> Task.andThen
@@ -543,7 +531,7 @@ onSelfMsgState router selfMsg state =
                     Idle ->
                         Task.succeed state_
                     Active tag _ ->
-                        notifyInteractors (Failed tag ConnectionBroken)
+                        notifyInteractors (Failed ConnectionBroken)
                         |> Task.andThen (\_ -> Task.succeed { state_ | task = Idle })
                 )
 
@@ -584,39 +572,39 @@ parseToResponse tag data =
         Ok event ->
             case event.event of
                 "ready" ->
-                    Asking tag
+                    Asking
                 "item" ->
                     case event.data of
                         Just data ->
-                            Received tag data
+                            Received data
                         Nothing ->
-                            Failed tag NoDataProvided
+                            Failed NoDataProvided
                 "done" ->
-                    Done tag
+                    Done
                 "fail" ->
                     case event.data of
                         Just data ->
                             case (JD.decodeValue JD.string data) of
                                 Ok reason ->
-                                    Failed tag (InternalError reason)
+                                    Failed (InternalError reason)
                                 Err explanation ->
-                                    Failed tag (ParseError explanation)
+                                    Failed (ParseError explanation)
                         Nothing ->
-                            Failed tag NoDataProvided
+                            Failed NoDataProvided
                 "suspended" ->
                     case event.data of
                         Just data ->
                             case (JD.decodeValue JD.int data) of
                                 Ok taskId ->
-                                    Suspended tag taskId
+                                    Suspended taskId
                                 Err explanation ->
-                                    Failed tag (ParseError explanation)
+                                    Failed (ParseError explanation)
                         Nothing ->
-                            Failed tag NoDataProvided
+                            Failed NoDataProvided
                 unknown ->
-                    Failed tag (UnknownEvent unknown)
+                    Failed (UnknownEvent unknown)
         Err explanation ->
-            Failed tag (ParseError explanation)
+            Failed (ParseError explanation)
 
 notifyAll : Platform.Router msg Msg -> List (a -> msg) -> a -> Platform.Task x (List ())
 notifyAll router taggers msgObj =
