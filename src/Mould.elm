@@ -192,22 +192,22 @@ cancel url tag =
 -- SUBSCRIPTIONS
 
 type MySub msg
-  = Interact String (Response -> msg)
-  | Listen String (Notification -> msg)
+  = Interact Url Tag (Response -> msg)
+  | Listen Url (Notification -> msg)
 
 -- Effect Module API
 subMap : (a -> b) -> MySub a -> MySub b
 subMap func sub =
     case sub of
-        Interact url tagger ->
-            Interact url (tagger >> func)
-        Listen url tagger ->
-            Listen url (tagger >> func)
+        Interact url tag wrapper ->
+            Interact url tag (wrapper >> func)
+        Listen url wrapper ->
+            Listen url (wrapper >> func)
 
-getSubUrl : MySub a -> String
+getSubUrl : MySub a -> Url
 getSubUrl sub =
     case sub of
-        Interact url _ -> url
+        Interact url _ _ -> url
         Listen url _ -> url
 
 {-| Subscribe to interaction messages from mould server. Example:
@@ -217,9 +217,9 @@ getSubUrl sub =
     subscriptions model =
         Mould.interact "ws://mould.example.com" MouldTag
 -}
-interact : String -> (Response -> msg) -> Sub msg
-interact url tagger =
-    subscription (Interact url tagger)
+interact : Url -> Tag -> (Response -> msg) -> Sub msg
+interact url tag wrapper =
+    subscription (Interact url tag wrapper)
 
 {-| Subscribe to notification messages from this library. Example:
 
@@ -228,9 +228,9 @@ interact url tagger =
     subscriptions model =
         Mould.listen "ws://mould.example.com" NotifyTag
 -}
-listen : String -> (Notification -> msg) -> Sub msg
-listen url tagger =
-    subscription (Listen url tagger)
+listen : Url -> (Notification -> msg) -> Sub msg
+listen url wrapper =
+    subscription (Listen url wrapper)
 
 type TaskOrigin
     = FromRequest Request
@@ -240,12 +240,16 @@ type Task
     = Idle
     | Active String TaskOrigin
 
-type alias Uplink msg = Dict String (State msg)
+{-| It's an unique connection to a server.
+-}
+type alias Uplink msg = Dict Url (State msg)
+
+type alias Interactors msg = Dict Tag (Response -> msg)
 
 type alias State msg =
     { status : Status
     , task : Task
-    , interactors : List (Response -> msg)
+    , interactors : Interactors msg
     , listeners : List (Notification -> msg)
     }
 
@@ -272,7 +276,7 @@ initState : State msg
 initState =
     { status = Disconnected
     , task = Idle
-    , interactors = []
+    , interactors = Dict.empty
     , listeners = []
     }
 
@@ -335,16 +339,16 @@ processSubscriptions
 processSubscriptions router subs state =
     let
         listenerExtractor sub = case sub of
-            Listen _ tagger -> Just tagger
+            Listen _ wrapper -> Just wrapper
             _ -> Nothing
         interactorExtractor sub = case sub of
-            Interact _ tagger -> Just tagger
+            Interact _ tag wrapper -> Just (tag, wrapper)
             _ -> Nothing
         -- TODO But important to reject tasks of removed subscriptions and send notification about it
         listeners_ = List.filterMap listenerExtractor subs
         interactors_ = List.filterMap interactorExtractor subs
     in
-        Task.succeed { state | interactors = interactors_, listeners = listeners_ }
+        Task.succeed { state | interactors = Dict.fromList interactors_, listeners = listeners_ }
 
 processCommands
     : Platform.Router msg Msg
@@ -353,8 +357,8 @@ processCommands
     -> Platform.Task Never (State msg)
 processCommands router cmds state =
     let
-        notifyInteractors msg =
-            notifyAll router state.interactors msg
+        notifyInteractor tag msg =
+            notifyDirect router state.interactors tag msg
         notifyListeners msg =
             notifyAll router state.listeners msg
     in case (cmds, state.task, state.status) of
@@ -367,7 +371,7 @@ processCommands router cmds state =
             |> Task.andThen
                 (\maybeBadSend -> case maybeBadSend of
                     Just badSend ->
-                        notifyInteractors (Failed ConnectionBroken)
+                        notifyInteractor tag (Failed ConnectionBroken)
                         |> Task.andThen (\_ -> Task.succeed state) -- stay Idle
                     Nothing ->
                         notifyListeners (BeginTask tag)
@@ -379,7 +383,7 @@ processCommands router cmds state =
             |> Task.andThen
                 (\maybeBadSend -> case maybeBadSend of
                     Just badSend ->
-                        notifyInteractors (Failed ConnectionBroken)
+                        notifyInteractor tag (Failed ConnectionBroken)
                         |> Task.andThen (\_ -> Task.succeed state) -- stay Idle
                     Nothing ->
                         notifyListeners (BeginTask tag)
@@ -389,14 +393,14 @@ processCommands router cmds state =
         -- ANSWER CURRENT | HAS ACTIVE | CONNECTED
         ((Answer url tag maybeSubRequest) :: tail, Active activeTag _, Connected socket) ->
             if tag /= activeTag then
-                notifyInteractors (Failed (UnexpectedAnswer activeTag))
+                notifyInteractor tag (Failed (UnexpectedAnswer activeTag))
                 |> Task.andThen (\_ -> processCommands router tail state)
             else
                 WS.send socket (stringifyNext maybeSubRequest)
                 |> Task.andThen
                     (\maybeBadSend -> case maybeBadSend of
                         Just badSend ->
-                            notifyInteractors (Failed ConnectionBroken)
+                            notifyInteractor tag (Failed ConnectionBroken)
                             |> Task.andThen (\_ -> Task.succeed { state | task = Idle }) -- become Idle
                         Nothing ->
                             Task.succeed state -- stay Active
@@ -405,14 +409,14 @@ processCommands router cmds state =
         -- SUSPEND CURRENT | HAS ACTIVE | CONNECTED
         ((Suspend url tag) :: tail, Active activeTag _, Connected socket) ->
             if tag /= activeTag then
-                notifyInteractors (Failed (UnexpectedSuspend activeTag))
+                notifyInteractor tag (Failed (UnexpectedSuspend activeTag))
                 |> Task.andThen (\_ -> processCommands router tail state)
             else
                 WS.send socket (stringifySuspend)
                 |> Task.andThen
                     (\maybeBadSend -> case maybeBadSend of
                         Just badSend ->
-                            notifyInteractors (Failed ConnectionBroken)
+                            notifyInteractor tag (Failed ConnectionBroken)
                             |> Task.andThen (\_ -> Task.succeed { state | task = Idle }) -- become Idle
                         Nothing ->
                             Task.succeed state -- stay Active
@@ -421,7 +425,7 @@ processCommands router cmds state =
         -- CANCEL CURRENT | HAS ACTIVE | CONNECTED
         ((Cancel url tag) :: tail, Active activeTag _, Connected socket) ->
             if tag /= activeTag then
-                notifyInteractors (Failed (UnexpectedCancel activeTag))
+                notifyInteractor tag (Failed (UnexpectedCancel activeTag))
                 |> Task.andThen (\_ -> processCommands router tail state)
             else
                 WS.send socket (stringifyCancel)
@@ -433,17 +437,17 @@ processCommands router cmds state =
                             Nothing -> (Failed Canceled)
                     in
                         notifyListeners (EndTask tag)
-                        |> Task.andThen (\_ -> notifyInteractors failedMsg)
+                        |> Task.andThen (\_ -> notifyInteractor tag failedMsg)
                         |> Task.andThen (\_ -> Task.succeed { state | task = Idle }) -- become Idle
                         |> Task.andThen (\state -> processCommands router tail state)
                     )
         -- SEND NEW | HAS ACTIVE | ANY
         ((Send url tag _) :: tail, Active activeTag _, _) ->
-            notifyInteractors (Failed (HasActiveTask activeTag))
+            notifyInteractor tag (Failed (HasActiveTask activeTag))
             |> Task.andThen (\_ -> processCommands router tail state)
         -- ANY | ANY | ANY
         (cmd :: tail, _, _) ->
-            notifyInteractors (Failed ConnectionBroken)
+            notifyInteractor (getCmdTag cmd) (Failed ConnectionBroken)
             |> Task.andThen (\_ -> processCommands router tail state)
 
 -- HANDLE SELF MESSAGES
@@ -486,8 +490,8 @@ onSelfMsgState
     -> Platform.Task Never (State msg)
 onSelfMsgState router selfMsg state =
     let
-        notifyInteractors msg =
-            notifyAll router state.interactors msg
+        notifyInteractor tag msg =
+            notifyDirect router state.interactors tag msg
         notifyListeners msg =
             notifyAll router state.listeners msg
     in case selfMsg of
@@ -504,7 +508,7 @@ onSelfMsgState router selfMsg state =
                             Received _ -> False
                             Asking -> False
                 in
-                    notifyInteractors response
+                    notifyInteractor tag response
                     |> Task.andThen
                         (\_ ->
                         if readyToNext then
@@ -531,7 +535,7 @@ onSelfMsgState router selfMsg state =
                     Idle ->
                         Task.succeed state_
                     Active tag _ ->
-                        notifyInteractors (Failed ConnectionBroken)
+                        notifyInteractor tag (Failed ConnectionBroken)
                         |> Task.andThen (\_ -> Task.succeed { state_ | task = Idle })
                 )
 
@@ -606,13 +610,19 @@ parseToResponse tag data =
         Err explanation ->
             Failed (ParseError explanation)
 
-notifyAll : Platform.Router msg Msg -> List (a -> msg) -> a -> Platform.Task x (List ())
+notifyAll : Platform.Router msg Msg -> List (Notification -> msg) -> Notification -> Platform.Task x (List ())
 notifyAll router taggers msgObj =
     let
         sends =
-            List.map (\tagger -> Platform.sendToApp router (tagger msgObj)) taggers
+            List.map (\wrapper -> Platform.sendToApp router (wrapper msgObj)) taggers
     in
        Task.sequence sends
+
+notifyDirect : Platform.Router msg Msg -> Interactors msg -> Tag -> Response -> Platform.Task x ()
+notifyDirect router taggers tag msgObj =
+    case Dict.get tag taggers of
+        Just wrapper -> Platform.sendToApp router (wrapper msgObj)
+        Nothing -> Task.succeed () -- TODO Log about fatal error
 
 -- INTERNALS
 type alias Event =
