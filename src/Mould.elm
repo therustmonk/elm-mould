@@ -36,6 +36,9 @@ import Task exposing (Task)
 import Process
 import WebSocket.LowLevel as WS
 
+type alias Tag = String
+type alias Url = String
+
 {-| Request to a Mould server.
 -}
 type alias Request =
@@ -84,11 +87,11 @@ getTag response =
         Suspended tag _ -> tag
 
 type MyCmd msg
-    = Send String String Request
-    | Answer String String (Maybe SubRequest)
-    | Suspend String String
-    | Resume String String Int
-    | Cancel String String
+    = Send Url Tag Request
+    | Answer Url Tag (Maybe SubRequest)
+    | Suspend Url Tag
+    | Resume Url Tag Int
+    | Cancel Url Tag
 
 {-| Convert FailReason to user readable string.
 -}
@@ -120,16 +123,16 @@ failToString fail =
 cmdMap : (a -> b) -> MyCmd a -> MyCmd b
 cmdMap _ cmd =
     case cmd of
-        Send url namespace request ->
-            Send url namespace request
-        Answer url namespace maybeSubRequest ->
-            Answer url namespace maybeSubRequest
-        Suspend url namespace ->
-            Suspend url namespace
-        Resume url namespace taskId ->
-            Resume url namespace taskId
-        Cancel url namespace ->
-            Cancel url namespace
+        Send url tag request ->
+            Send url tag request
+        Answer url tag maybeSubRequest ->
+            Answer url tag maybeSubRequest
+        Suspend url tag ->
+            Suspend url tag
+        Resume url tag taskId ->
+            Resume url tag taskId
+        Cancel url tag ->
+            Cancel url tag
 
 getCmdTag : MyCmd a -> String
 getCmdTag cmd =
@@ -162,41 +165,41 @@ getCmdUrl cmd =
 
     Mould.send "ws://mould.example.com" "task-id" request
 -}
-send : String -> String -> Request -> Cmd msg
-send url namespace request =
-    command (Send url namespace request)
+send : Url -> Tag -> Request -> Cmd msg
+send url tag request =
+    command (Send url tag request)
 
 {-| Send answer to a **ready** message. Use it like this:
 
     Mould.answer "ws://mould.example.com" "task-id" Nothing
 -}
-answer : String -> String -> Maybe SubRequest -> Cmd msg
-answer url namespace maybeSubRequest =
-    command (Answer url namespace maybeSubRequest)
+answer : Url -> Tag -> Maybe SubRequest -> Cmd msg
+answer url tag maybeSubRequest =
+    command (Answer url tag maybeSubRequest)
 
 {-| Suspend current task with **id**. Suspended id response expected. Example:
 
     Mould.suspend "ws://mould.example.com" "task-id"
 -}
-suspend : String -> String -> Cmd msg
-suspend url namespace =
-    command (Suspend url namespace)
+suspend : Url -> Tag -> Cmd msg
+suspend url tag =
+    command (Suspend url tag)
 
 {-| Resume current task with **id**. Task should be suspended before (task-id retrived). Example:
 
     Mould.resume "ws://mould.example.com" "task-id" 0
 -}
-resume : String -> String -> Int -> Cmd msg
-resume url namespace taskId =
-    command (Resume url namespace taskId)
+resume : Url -> Tag -> Int -> Cmd msg
+resume url tag taskId =
+    command (Resume url tag taskId)
 
 {-| Cancel current task with **id**. Example:
 
     Mould.cancel "ws://mould.example.com" "task-id"
 -}
-cancel : String -> String -> Cmd msg
-cancel url namespace =
-    command (Cancel url namespace)
+cancel : Url -> Tag -> Cmd msg
+cancel url tag =
+    command (Cancel url tag)
 
 -- SUBSCRIPTIONS
 
