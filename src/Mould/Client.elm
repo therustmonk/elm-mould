@@ -1,4 +1,4 @@
-module Client exposing (..)
+module Mould.Client exposing (..)
 
 {-| Client for interaction with Mould server.
 
