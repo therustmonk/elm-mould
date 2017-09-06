@@ -4,7 +4,64 @@ This package is a client library to interact with [mould][] server.
 
 [mould]: https://github.com/DenisKolodin/mould
 
-## Usage
+## Declare a service
+
+For example, let's declare service of: https://github.com/DenisKolodin/mould-auth
+
+```elm
+module MouldAuth exposing (..)
+
+import Json.Encode as JS
+import Json.Decode as JD exposing (field)
+import Mould.Client as Client
+
+type alias Model = Client.Model () Response
+
+type alias Msg = Client.Msg Request ()
+
+type alias Login = String
+type alias Password = String
+
+type Request
+    = DoLogin Login Password
+    | DoLogout
+    | ChangePassword Password
+
+type Response
+    = LoginValid Bool
+    | LoggedOut
+    | PasswordChanged
+
+protocol : Request -> Client.Call () Response
+protocol req =
+    case req of
+        DoLogin login password ->
+            { action = "do-login"
+            , payload = JS.object
+                [ ("login", JS.string login)
+                , ("password", JS.string password)
+                ]
+            , decoder = Client.OutOnly <| JD.map LoginValid (field "success" JD.bool)
+            }
+        DoLogout ->
+            { action = "do-logout"
+            , payload = JS.null
+            , decoder = Client.Explicit LoggedOut
+            }
+        ChangePassword password ->
+            { action = "change-password"
+            , payload = JS.object
+                [ ("password", JS.string password)
+                ]
+            , decoder = Client.Explicit PasswordChanged
+            }
+
+flow () = JS.null
+
+update = Client.update protocol flow
+```
+
+## Raw usage
 
 ```elm
 
